@@ -1,0 +1,168 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+!pip install --ignore-installed --upgrade tensorflow --user
+from sklearn.datasets import load_files
+from keras.utils import np_utils
+import numpy as np
+import pandas as pd
+from glob import glob
+from tensorflow.keras.applications import ResNet50
+
+# define ResNet50 model
+ResNet50_model = ResNet50(weights='imagenet')
+ResNet50_model.summary()
+def load_dataset(path):
+    data = load_files(path)
+    plant_files = np.array(data['filenames'])
+    plant_targets = np_utils.to_categorical(np.array(data['target']), 4)
+    return plant_files, plant_targets
+
+# load train, test, and validation datasets
+train_files, train_targets = load_dataset('dataset/train')
+#valid_files, valid_targets = load_dataset('dataset/test/')
+test_files, test_targets = load_dataset('dataset/test')
+
+# load list of dog names
+plant_stage = [item[14:-1] for item in sorted(glob("dataset/train/*/"))]
+print(plant_stage)
+# print statistics about the dataset
+print('There are %d total plant diseases stages.' % len(plant_stage))
+print('There are %d total plant images.\n' % len(np.hstack([train_files, test_files])))
+print('There are %d training plants images.' % len(train_files))
+#print('There are %d validation dog images.' % len(valid_files))
+print('There are %d test plant images.'% len(test_files))
+from tensorflow.keras.preprocessing import image                  
+from tqdm import tqdm
+
+def path_to_tensor(img_path):
+    # loads RGB image as PIL.Image.Image type
+    img = image.load_img(img_path, target_size=(224, 224))
+    # convert PIL.Image.Image type to 3D tensor with shape (224, 224, 3)
+    x = image.img_to_array(img)
+    # convert 3D tensor to 4D tensor with shape (1, 224, 224, 3) and return 4D tensor
+    
+    return np.expand_dims(x, axis=0)
+
+def paths_to_tensor(img_paths):
+    list_of_tensors = [path_to_tensor(img_path) for img_path in tqdm(img_paths)]
+    return np.vstack(list_of_tensors)
+from tensorflow.keras.applications.resnet50 import preprocess_input, decode_predictions
+
+def ResNet50_predict_labels(img_path):
+    # returns prediction vector for image located at img_path
+    img = preprocess_input(path_to_tensor(img_path))
+    return np.argmax(ResNet50_model.predict(img))
+def plant_detector(img_path):
+    prediction = ResNet50_predict_labels(img_path)
+    return ((prediction <= 268) & (prediction >= 151)) 
+# pre-process the data for Keras
+train_tensors = paths_to_tensor(train_files).astype('float32')/255
+test_tensors = paths_to_tensor(test_files).astype('float32')/255
+img=train_tensors[0]
+len(train_tensors)
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+# create and configure augmented image generator
+datagen = ImageDataGenerator(
+    width_shift_range=0.1,  # randomly shift images horizontally (10% of total width)
+    height_shift_range=0.1,  # randomly shift images vertically (10% of total height)
+    horizontal_flip=True) # randomly flip images horizontally
+
+# fit augmented image generator on data
+datagen.fit(train_tensors)
+import tensorflow as tf
+from tensorflow.keras import layers
+
+from tensorflow.keras.layers import Dense, Activation
+import tensorflow_hub as hub
+
+# Download the pretrained model and save it as a Keras layer
+feature_extractor_layer = hub.KerasLayer("https://tfhub.dev/google/imagenet/mobilenet_v2_140_224/feature_vector/5",
+                                       trainable=False, # freeze the underlying patterns
+                                       input_shape=(224,224,3)) # define the input image shape
+
+model = tf.keras.Sequential([
+    feature_extractor_layer, # use the feature extraction layer as the base
+    layers.Dense(4, activation='softmax', name='output_layer') # create our own output layer      
+  ])
+model.summary()
+from keras.optimizers import Adam, Adamax, RMSprop
+
+
+#model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'],run_eagerly=True)
+model.compile(loss='categorical_crossentropy', optimizer=Adamax(learning_rate=0.002), metrics=['accuracy'],run_eagerly=True)
+#resnet_model.compile(loss='categorical_crossentropy', optimizer= RMSprop(learning_rate=0.002), metrics=['accuracy'])
+from keras.callbacks import ModelCheckpoint
+
+checkpointer = ModelCheckpoint(filepath='saved_models/test_01.hdf5', 
+                               verbose=1, save_best_only=True)
+, callbacks=checkpointer
+tf.config.run_functions_eagerly(True)
+tf.data.experimental.enable_debug_mode()
+epochs = 21
+batch_size = 20
+
+                               
+### Using Image Augmentation
+history=model.fit(datagen.flow(train_tensors, train_targets, batch_size=batch_size),
+                    validation_data=(test_tensors, test_targets), 
+                    steps_per_epoch=train_tensors.shape[0] // batch_size,
+                    epochs=epochs, verbose=1)
+
+
+#opt = Adam(learning_rate=0.0002)
+opt = Adamax(learning_rate=0.0002)
+#opt = RMSprop(learning_rate=0.0002)
+
+epochs = 25
+batch_size = 32
+
+### Using Image Augmentation
+history=model.fit(datagen.flow(train_tensors, train_targets, batch_size=batch_size),
+                    validation_data=(test_tensors, test_targets), 
+                    steps_per_epoch=train_tensors.shape[0] // batch_size,
+                    epochs=epochs, verbose=1)
+score, acc = model.evaluate(test_tensors, test_targets)
+print('Test Loss =', score)
+print('Test Accuracy =', acc*100)
+import matplotlib.pyplot  as plot
+
+plot.subplot(2,1,1)
+plot.plot(history.history['accuracy'])
+plot.plot(history.history['val_accuracy'])
+plot.title('model accuracy')
+plot.ylabel('accuracy')
+plot.xlabel('epoch')
+plot.legend(['train', 'test'], loc='lower right')
+plot.subplot(2,1,2)
+plot.plot(history.history['loss'])
+plot.plot(history.history['val_loss'])
+plot.title('model loss')
+plot.ylabel('loss')
+plot.xlabel('epoch')
+plot.legend(['train', 'test'], loc='upper right')
+model.save('saved_models/test_01.hdf5')
+model.load_weights('saved_models/test_01.hdf5')
+import cv2
+import matplotlib.pyplot as plt
+def predict_stage(img_path):
+    
+    
+    feature = path_to_tensor(img_path)/255
+    
+    # obtain predicted vector
+    predicted_vector = model.predict(feature)
+    
+    # return dog breed that is predicted by the model
+    df = pd.DataFrame(data={'predicted_vector': predicted_vector.reshape(-1), 'plant_disease_stage': plant_stage})
+    
+    df_sort=df.sort_values(['predicted_vector'], ascending=False)
+    stage = plant_stage[np.argmax(predicted_vector)]
+    img = cv2.imread(img_path)
+    cv_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    imgplot = plt.imshow(cv_rgb)
+    
+    return print("The disease stage of the plant is  {}\n Plant disease stage are:\n ".format(stage)+df_sort.head(n=5).to_string(index=False))
+predict_stage('dataset/test/stage1/Leaf_Downymildew_stage1_5-20_ (17).jpg')
+
+
